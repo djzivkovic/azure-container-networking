@@ -515,14 +515,14 @@ func (client *TransparentVlanEndpointClient) ConfigureContainerInterfacesAndRout
 		if err := client.addDualNicInfraRoutes(client.containerVethName, 0); err != nil {
 			return errors.Wrap(err, "failed container ns add infra routes")
 		}
-		if err := client.AddDualNicArp(client.containerVethName, client.vnetMac.String()); err != nil {
+		if err := client.AddArpEntry(virtualGwIPInfraString, client.containerVethName, client.vnetMac.String()); err != nil {
 			return errors.Wrap(err, "failed container ns add dual nic arp")
 		}
 	} else {
 		if err := client.addDefaultRoutes(client.containerVethName, 0); err != nil {
 			return errors.Wrap(err, "failed container ns add default routes")
 		}
-		if err := client.AddDefaultArp(client.containerVethName, client.vnetMac.String()); err != nil {
+		if err := client.AddArpEntry(virtualGwIPVlanString, client.containerVethName, client.vnetMac.String()); err != nil {
 			return errors.Wrap(err, "failed container ns add default arp")
 		}
 	}
@@ -541,7 +541,7 @@ func (client *TransparentVlanEndpointClient) ConfigureVnetInterfacesAndRoutesImp
 	if err = client.addDefaultRoutes(client.vlanIfName, 0); err != nil {
 		return errors.Wrap(err, "failed vnet ns add default/gateway routes (idempotent)")
 	}
-	if err = client.AddDefaultArp(client.vlanIfName, azureMac); err != nil {
+	if err = client.AddArpEntry(virtualGwIPVlanString, client.vlanIfName, azureMac); err != nil {
 		return errors.Wrap(err, "failed vnet ns add default arp entry (idempotent)")
 	}
 
@@ -648,31 +648,8 @@ func (client *TransparentVlanEndpointClient) addDefaultRoutes(linkToName string,
 // Helper that creates arp entry for the current NS which maps the virtual
 // gateway (169.254.2.1) to destMac on a particular interfaceName
 // Example: (169.254.2.1) at 12:34:56:78:9a:bc [ether] PERM on <interfaceName>
-func (client *TransparentVlanEndpointClient) AddDualNicArp(interfaceName, destMac string) error {
-	_, virtualGwNet, _ := net.ParseCIDR(virtualGwIPInfraString)
-	logger.Info("Adding static arp for",
-		zap.String("IP", virtualGwNet.String()), zap.String("MAC", destMac))
-	hardwareAddr, err := net.ParseMAC(destMac)
-	if err != nil {
-		return errors.Wrap(err, "unable to parse mac")
-	}
-	linkInfo := netlink.LinkInfo{
-		Name:       interfaceName,
-		IPAddr:     virtualGwNet.IP,
-		MacAddress: hardwareAddr,
-	}
-
-	if err := client.netlink.SetOrRemoveLinkAddress(linkInfo, netlink.ADD, netlink.NUD_PERMANENT); err != nil {
-		return fmt.Errorf("adding arp entry failed: %w", err)
-	}
-	return nil
-}
-
-// Helper that creates arp entry for the current NS which maps the virtual
-// gateway (169.254.2.1) to destMac on a particular interfaceName
-// Example: (169.254.2.1) at 12:34:56:78:9a:bc [ether] PERM on <interfaceName>
-func (client *TransparentVlanEndpointClient) AddDefaultArp(interfaceName, destMac string) error {
-	_, virtualGwNet, _ := net.ParseCIDR(virtualGwIPVlanString)
+func (client *TransparentVlanEndpointClient) AddArpEntry(ip, interfaceName, destMac string) error {
+	_, virtualGwNet, _ := net.ParseCIDR(ip)
 	logger.Info("Adding static arp for",
 		zap.String("IP", virtualGwNet.String()), zap.String("MAC", destMac))
 	hardwareAddr, err := net.ParseMAC(destMac)
