@@ -222,7 +222,7 @@ func (nw *network) deleteEndpoint(nl netlink.NetlinkInterface, plc platform.Exec
 
 	// Remove the endpoint object.
 	delete(nw.Endpoints, endpointID)
-	logger.Info("Deleted endpoint. Num of endpoints", zap.Any("ep", ep), zap.Int("numEndpoints", len(nw.Endpoints)))
+	logger.Info("Deleting endpoint from network", zap.Any("ep", ep), zap.Int("numEndpoints", len(nw.Endpoints)))
 	return nil
 }
 

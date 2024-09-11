@@ -543,9 +543,12 @@ func (client *TransparentVlanEndpointClient) ConfigureContainerInterfacesAndRout
 		}
 
 		virtualGwIp, virtualGwIpNet, _ := net.ParseCIDR(virtualGwIPVlanString)
+
+		// IP[14] is the c in a.b.c.d IPv4 format
 		virtualGwIp[14] += byte(len(existingRoutes))
 		virtualGwIpNetString := (&net.IPNet{IP: virtualGwIp, Mask: virtualGwIpNet.Mask}).String()
 
+		// epInfo.IPAddresses always has 1 element on linux ?
 		epAddr := epInfo.IPAddresses[0]
 		routeSubnet := net.IPNet{IP: epAddr.IP.Mask(epAddr.Mask), Mask: epAddr.Mask}
 
