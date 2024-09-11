@@ -19,15 +19,17 @@ import (
 )
 
 const (
-	virtualGwIPVlanString = "169.254.2.1/32"
-	azureMac              = "12:34:56:78:9a:bc"                       // Packets leaving the VM should have this MAC
-	loopbackIf            = "lo"                                      // The name of the loopback interface
-	numDefaultRoutes      = 2                                         // VNET NS, when no containers use it, has this many routes
-	tunnelingTable        = 2                                         // Packets not entering on the vlan interface go to this routing table
-	tunnelingMark         = 333                                       // The packets that are to tunnel will be marked with this number
-	DisableRPFilterCmd    = "sysctl -w net.ipv4.conf.all.rp_filter=0" // Command to disable the rp filter for tunneling
-	numRetries            = 5
-	sleepInMs             = 100
+	virtualGwIPVlanString  = "169.254.2.1/32"
+	virtualGwIPInfraString = "169.254.3.1/32"
+	infraSubnetIPString    = "10.0.7.0/24"
+	azureMac               = "12:34:56:78:9a:bc"                       // Packets leaving the VM should have this MAC
+	loopbackIf             = "lo"                                      // The name of the loopback interface
+	numDefaultRoutes       = 2                                         // VNET NS, when no containers use it, has this many routes
+	tunnelingTable         = 2                                         // Packets not entering on the vlan interface go to this routing table
+	tunnelingMark          = 333                                       // The packets that are to tunnel will be marked with this number
+	DisableRPFilterCmd     = "sysctl -w net.ipv4.conf.all.rp_filter=0" // Command to disable the rp filter for tunneling
+	numRetries             = 5
+	sleepInMs              = 100
 )
 
 var errNamespaceCreation = fmt.Errorf("network namespace creation error")
@@ -502,11 +504,27 @@ func (client *TransparentVlanEndpointClient) ConfigureContainerInterfacesAndRout
 		}
 	}
 
-	if err := client.addDefaultRoutes(client.containerVethName, 0); err != nil {
-		return errors.Wrap(err, "failed container ns add default routes")
+	_, defaultRoute, _ := net.ParseCIDR(defaultGwCidr)
+	routes, err := client.netlink.GetIPRoute(&netlink.Route{Dst: defaultRoute})
+	if err != nil {
+		return errors.Wrap(err, "failed to get default ip routes in container ns")
 	}
-	if err := client.AddDefaultArp(client.containerVethName, client.vnetMac.String()); err != nil {
-		return errors.Wrap(err, "failed container ns add default arp")
+
+	// DUAL NIC: fix container default route conflict
+	if len(routes) > 0 {
+		if err := client.addDualNicInfraRoutes(client.containerVethName, 0); err != nil {
+			return errors.Wrap(err, "failed container ns add infra routes")
+		}
+		if err := client.AddDualNicArp(client.containerVethName, client.vnetMac.String()); err != nil {
+			return errors.Wrap(err, "failed container ns add dual nic arp")
+		}
+	} else {
+		if err := client.addDefaultRoutes(client.containerVethName, 0); err != nil {
+			return errors.Wrap(err, "failed container ns add default routes")
+		}
+		if err := client.AddDefaultArp(client.containerVethName, client.vnetMac.String()); err != nil {
+			return errors.Wrap(err, "failed container ns add default arp")
+		}
 	}
 	return nil
 }
@@ -565,6 +583,36 @@ func (client *TransparentVlanEndpointClient) GetVnetRoutes(ipAddresses []net.IPN
 	return routeInfoList
 }
 
+// DUAL NIC: Add route to infra subnet
+func (client *TransparentVlanEndpointClient) addDualNicInfraRoutes(linkToName string, table int) error {
+	// Add route for virtualgwip (ip route add 169.254.3.1 dev infra0)
+	virtualGwIP, virtualGwNet, _ := net.ParseCIDR(virtualGwIPInfraString)
+	routeInfo := RouteInfo{
+		Dst:   *virtualGwNet,
+		Scope: netlink.RT_SCOPE_LINK,
+		Table: table,
+	}
+	// Difference between interface name in addRoutes and DevName: in RouteInfo?
+	if err := addRoutes(client.netlink, client.netioshim, linkToName, []RouteInfo{routeInfo}); err != nil {
+		return err
+	}
+
+	// Add default route (ip route add 10.0.10.0/24 via 169.254.3.1)
+	subnetIP, subnetIPNet, _ := net.ParseCIDR(infraSubnetIPString)
+	dstIP := net.IPNet{IP: subnetIP, Mask: subnetIPNet.Mask}
+	routeInfo = RouteInfo{
+		Dst:   dstIP,
+		Gw:    virtualGwIP,
+		Table: table,
+	}
+
+	if err := addRoutes(client.netlink, client.netioshim, linkToName, []RouteInfo{routeInfo}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // Helper that creates routing rules for the current NS which direct packets
 // to the virtual gateway ip on linkToName device interface
 // Route 1: 169.254.2.1 dev <linkToName>
@@ -593,6 +641,29 @@ func (client *TransparentVlanEndpointClient) addDefaultRoutes(linkToName string,
 
 	if err := addRoutes(client.netlink, client.netioshim, linkToName, []RouteInfo{routeInfo}); err != nil {
 		return err
+	}
+	return nil
+}
+
+// Helper that creates arp entry for the current NS which maps the virtual
+// gateway (169.254.2.1) to destMac on a particular interfaceName
+// Example: (169.254.2.1) at 12:34:56:78:9a:bc [ether] PERM on <interfaceName>
+func (client *TransparentVlanEndpointClient) AddDualNicArp(interfaceName, destMac string) error {
+	_, virtualGwNet, _ := net.ParseCIDR(virtualGwIPInfraString)
+	logger.Info("Adding static arp for",
+		zap.String("IP", virtualGwNet.String()), zap.String("MAC", destMac))
+	hardwareAddr, err := net.ParseMAC(destMac)
+	if err != nil {
+		return errors.Wrap(err, "unable to parse mac")
+	}
+	linkInfo := netlink.LinkInfo{
+		Name:       interfaceName,
+		IPAddr:     virtualGwNet.IP,
+		MacAddress: hardwareAddr,
+	}
+
+	if err := client.netlink.SetOrRemoveLinkAddress(linkInfo, netlink.ADD, netlink.NUD_PERMANENT); err != nil {
+		return fmt.Errorf("adding arp entry failed: %w", err)
 	}
 	return nil
 }
