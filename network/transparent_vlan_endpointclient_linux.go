@@ -485,13 +485,13 @@ func (client *TransparentVlanEndpointClient) ConfigureContainerInterfacesAndRout
 	return nil
 }
 
-func (client *TransparentVlanEndpointClient) DefaultRouteExists() (bool, error) {
+func (client *TransparentVlanEndpointClient) GetDefaultRoutes() ([]*netlink.Route, error) {
 	_, defaultRoute, _ := net.ParseCIDR(defaultGwCidr)
 	defaultRoutes, err := client.netlink.GetIPRoute(&netlink.Route{Dst: defaultRoute})
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return len(defaultRoutes) > 0, nil
+	return defaultRoutes, nil
 }
 
 func (client *TransparentVlanEndpointClient) GetExistingVirtualGateways() ([]*netlink.Route, error) {
@@ -530,13 +530,13 @@ func (client *TransparentVlanEndpointClient) ConfigureContainerInterfacesAndRout
 		}
 	}
 
-	defaultRouteExists, err := client.DefaultRouteExists()
+	defaultRoutes, err := client.GetDefaultRoutes()
 	if err != nil {
 		errors.Wrap(err, "failed to get default ip routes in container ns")
 	}
 
 	// DUAL NIC: fix container default route conflict
-	if defaultRouteExists {
+	if len(defaultRoutes) > 0 {
 		existingRoutes, err := client.GetExistingVirtualGateways()
 		if err != nil {
 			return errors.Wrap(err, "failed to get virtual gw ip routes in container ns")
